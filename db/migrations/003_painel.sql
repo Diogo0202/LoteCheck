@@ -32,6 +32,13 @@ SELECT a.id, a.nome,
   FROM item i JOIN atividade a ON a.id = i.atividade_id
  GROUP BY a.id, a.nome;
 
+-- Detalhe dos turnos pedidos (06:00-14:20, 13:40-22:00...).
+CREATE VIEW v_ranking_turnos AS
+SELECT i.hora_ini, i.hora_fim, i.vira_dia, count(*) AS itens
+  FROM item i JOIN atividade a ON a.id = i.atividade_id
+ WHERE a.codigo = 'TURNO'
+ GROUP BY i.hora_ini, i.hora_fim, i.vira_dia;
+
 -- Solicitante com mais IDs.
 CREATE VIEW v_ranking_solicitantes AS
 SELECT so.id, so.nome_exibicao,
