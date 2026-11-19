@@ -54,22 +54,25 @@ INSERT INTO solicitacao (id, chamado_id, data_solicitacao, importado_por) OVERRI
   (4, 3, hoje_sp(),     1);
 
 -- Ana: 12 itens em 2 IDs (5 + 3 na TKT-01, 4 na TKT-02)
-INSERT INTO item (celula, data_ajuste, colaborador, solicitacao_id, linha_origem, matricula, atividade_id, atividade_original)
+INSERT INTO item (ref_origem, data_ajuste, colaborador, solicitacao_id, linha_origem, matricula, atividade_id, atividade_original)
 SELECT 'D' || (l + 1), hoje_sp(), 'Colab ' || l, s, l + 1, '000' || l, 1 + (l % 3), 'orig' FROM
   (VALUES (1,1),(1,2),(1,3),(1,4),(1,5),(2,1),(2,2),(2,3),(3,1),(3,2),(3,3),(3,4)) v(s,l);
 
 -- 4. Regras de item
-SELECT pg_temp.deve_falhar($$INSERT INTO item (celula, data_ajuste, colaborador, solicitacao_id, linha_origem, matricula, atividade_id, atividade_original) VALUES ('D2', hoje_sp(), 'Z', 4, 2, NULL, 1, 'x')$$, 'sem matrícula pendente');
-INSERT INTO item (celula, data_ajuste, colaborador, solicitacao_id, linha_origem, matricula, atividade_id, atividade_original, status, motivo_codigo, avaliado_em, avaliado_por)
+SELECT pg_temp.deve_falhar($$INSERT INTO item (ref_origem, data_ajuste, colaborador, solicitacao_id, linha_origem, matricula, atividade_id, atividade_original) VALUES ('D2', hoje_sp(), 'Z', 4, 2, NULL, 1, 'x')$$, 'sem matrícula pendente');
+INSERT INTO item (ref_origem, data_ajuste, colaborador, solicitacao_id, linha_origem, matricula, atividade_id, atividade_original, status, motivo_codigo, avaliado_em, avaliado_por)
 VALUES ('D2', hoje_sp(), 'Z', 4, 2, NULL, 1, 'x', 'NAO_REALIZADO', 'SEM_MATRICULA', now(), 1);
 SELECT pg_temp.deve_falhar($$UPDATE item SET status='NAO_REALIZADO', avaliado_em=now(), avaliado_por=1 WHERE id=1$$, 'não realizado sem motivo');
 SELECT pg_temp.deve_falhar($$UPDATE item SET status='NAO_REALIZADO', motivo_codigo='OUTROS', avaliado_em=now(), avaliado_por=1 WHERE id=1$$, 'OUTROS sem observação');
-SELECT pg_temp.deve_falhar($$INSERT INTO item (celula, data_ajuste, colaborador, solicitacao_id, linha_origem, matricula, atividade_id, atividade_original, hora_ini, hora_fim) VALUES ('E2', hoje_sp(), 'Z', 4, 2, '1', 1, 'x', '22:00', '02:00')$$, 'virada sem confirmação');
-INSERT INTO item (celula, data_ajuste, colaborador, solicitacao_id, linha_origem, matricula, atividade_id, atividade_original, hora_ini, hora_fim, vira_dia)
+SELECT pg_temp.deve_falhar($$INSERT INTO item (ref_origem, data_ajuste, colaborador, solicitacao_id, linha_origem, matricula, atividade_id, atividade_original, hora_ini, hora_fim) VALUES ('E2', hoje_sp(), 'Z', 4, 2, '1', 1, 'x', '22:00', '02:00')$$, 'virada sem confirmação');
+INSERT INTO item (ref_origem, data_ajuste, colaborador, solicitacao_id, linha_origem, matricula, atividade_id, atividade_original, hora_ini, hora_fim, vira_dia)
 VALUES ('E2', hoje_sp(), 'Z', 4, 2, '1', 1, 'x', '22:00', '02:00', true);
 
-SELECT pg_temp.deve_falhar($$INSERT INTO item (celula, data_ajuste, colaborador, solicitacao_id, linha_origem, matricula, atividade_id, atividade_original) VALUES ('F2', hoje_sp(), 'Z', 4, 2, '1', 1, 'x')$$, 'mesma pessoa e dia duas vezes');
-SELECT pg_temp.deve_falhar($$INSERT INTO item (celula, data_ajuste, colaborador, solicitacao_id, linha_origem, matricula, atividade_id, atividade_original) VALUES ('d3', hoje_sp(), 'Z', 4, 3, '2', 1, 'x')$$, 'célula inválida');
+SELECT pg_temp.deve_falhar($$INSERT INTO item (ref_origem, data_ajuste, colaborador, solicitacao_id, linha_origem, matricula, atividade_id, atividade_original, hora_ini, hora_fim, vira_dia) VALUES ('F2', hoje_sp(), 'Z', 4, 3, '1', 1, 'x', '22:00', '02:00', true)$$, 'linha repetida');
+-- mesma pessoa, mesmo dia, outra atividade/horário: permitido
+INSERT INTO item (ref_origem, data_ajuste, solicitacao_id, linha_origem, matricula, atividade_id, atividade_original, hora_ini, hora_fim, celula, motivo_ajuste)
+VALUES ('F3', hoje_sp(), 4, 3, '1', 2, 'Treinamento', '10:00', '11:00', 'Amil/TC', 'Esqueceu de registrar');
+SELECT pg_temp.deve_falhar($$INSERT INTO item (ref_origem, data_ajuste, colaborador, solicitacao_id, linha_origem, matricula, atividade_id, atividade_original) VALUES ('d3', hoje_sp(), 'Z', 4, 3, '2', 1, 'x')$$, 'célula inválida');
 
 -- Ana: 2 exceções e conclusão. Solicitação 3 fica com 1 realizado e 3 pendentes.
 UPDATE item SET status='NAO_REALIZADO', motivo_codigo='OUTROS', observacao='colaborador desligado', avaliado_em=now(), avaliado_por=1 WHERE id = 1;
@@ -80,7 +83,7 @@ SELECT pg_temp.deve_falhar($$SELECT concluir_solicitacao(1, (SELECT versao FROM 
 
 -- 5. Estado e concorrência
 SELECT pg_temp.deve_falhar($$UPDATE item SET observacao='x' WHERE id = 2$$, 'editar item de solicitação concluída');
-SELECT pg_temp.deve_falhar($$INSERT INTO item (celula, data_ajuste, colaborador, solicitacao_id, linha_origem, matricula, atividade_id, atividade_original) VALUES ('Z99', hoje_sp(), 'Z', 1, 99, '1', 1, 'x')$$, 'acrescentar linha em solicitação concluída');
+SELECT pg_temp.deve_falhar($$INSERT INTO item (ref_origem, data_ajuste, colaborador, solicitacao_id, linha_origem, matricula, atividade_id, atividade_original) VALUES ('Z99', hoje_sp(), 'Z', 1, 99, '1', 1, 'x')$$, 'acrescentar linha em solicitação concluída');
 CREATE TEMP TABLE v AS SELECT versao FROM solicitacao WHERE id = 3;   -- tela mostra "4 pendentes"
 UPDATE item SET status='REALIZADO', avaliado_em=now(), avaliado_por=1 WHERE id = 9;  -- outro analista dá baixa
 SELECT pg_temp.deve_falhar($$SELECT concluir_solicitacao(3, (SELECT versao FROM v))$$, 'concluir com contagem desatualizada');
@@ -94,6 +97,11 @@ SELECT pg_temp.deve_falhar($$SELECT consumir_lote('00000000-0000-0000-0000-00000
 SET LOCAL app.usuario_id = '1';
 SELECT pg_temp.igual((consumir_lote('00000000-0000-0000-0000-000000000001')).chamado_codigo, 'TKT-00000009', 'consumir lote');
 SELECT pg_temp.deve_falhar($$SELECT consumir_lote('00000000-0000-0000-0000-000000000001')$$, 'confirmar lote duas vezes');
+
+-- Atividade nova vinda do chamado: sem código, casada pelo nome normalizado
+INSERT INTO atividade (nome) VALUES ('Feedback individual');
+SELECT pg_temp.igual((SELECT id FROM atividade WHERE nome_norm = f_norm('FEEDBACK  Individual')) IS NOT NULL, true, 'atividade por nome');
+SELECT pg_temp.deve_falhar($$INSERT INTO atividade (nome) VALUES ('feedback individual')$$, 'atividade repetida');
 
 -- 7. Homônimos: mesmo alias para duas pessoas = ambíguo
 INSERT INTO solicitante (nome_exibicao, email) VALUES ('Ana Souza', 'ana.souza2@empresa');
@@ -114,6 +122,7 @@ SELECT pg_temp.igual((SELECT count(*) FROM auditoria WHERE chamado_id = 1), 10::
 -- 9. Expurgo: simular a passagem do tempo
 SELECT pg_temp.igual((expurgar_dados(hoje_sp() + 88)).solicitacoes, 1, 'expurgo dia +88');  -- sai só a de hoje-2
 SELECT pg_temp.igual((SELECT count(*) FROM chamado), 3::bigint, 'chamados após +88');
+SELECT pg_temp.igual((SELECT itens FROM v_ranking_celulas WHERE celula = 'Amil/TC'), 1::bigint, 'ranking por célula');
 SELECT pg_temp.igual((SELECT count(*) FROM auditoria WHERE chamado_id = 1), 4::bigint, 'auditoria após +88');
 SELECT pg_temp.igual((expurgar_dados(hoje_sp() + 89)).chamados, 2, 'expurgo dia +89');      -- TKT-01 e TKT-02 somem
 SELECT pg_temp.igual((SELECT codigo FROM chamado), 'TKT-00000003', 'sobra TKT-03');

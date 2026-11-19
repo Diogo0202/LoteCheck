@@ -1,6 +1,6 @@
 # PontoBsa
 
-Sistema web interno para registrar chamados de escala, conferir o que foi executado e medir a demanda por solicitante. O analista informa o ID do chamado, escolhe o solicitante e envia a planilha de escala. O sistema converte cada célula da planilha em um item, o analista marca o que não foi realizado e o painel consolida os números dos últimos 90 dias.
+Sistema web interno para registrar chamados de escala, conferir o que foi executado e medir a demanda por solicitante. O analista informa o ID do chamado, escolhe o solicitante e envia a planilha do chamado. O sistema converte cada linha da planilha em um item, o analista marca o que não foi realizado e o painel consolida os números dos últimos 90 dias.
 
 > **Estado atual:** banco de dados e leitor da planilha prontos e testados. Telas, autenticação e painel ainda não foram construídos. Veja [Situação do projeto](#situação-do-projeto).
 
@@ -17,14 +17,14 @@ Sistema web interno para registrar chamados de escala, conferir o que foi execut
 5. **Conferência.** Todos os itens entram como `PENDENTE`. O analista marca só as exceções como `NÃO REALIZADO`, com motivo obrigatório.
 6. **Conclusão.** "Concluir solicitação" mostra quantos pendentes restam, converte todos em `REALIZADO` numa única transação e registra a operação na auditoria.
 
-Um chamado com 76 células e 2 exceções fecha com 2 marcações e 1 conclusão.
+Uma solicitação com 76 itens e 2 exceções fecha com 2 marcações e 1 conclusão.
 
 ### Hierarquia dos dados
 
 ```
 chamado (TKT-00001234)          um solicitante por chamado
   └── solicitação               cada planilha enviada, com a própria data
-        └── item                cada célula da escala (colaborador × data)
+        └── item                cada linha do chamado (ou cada célula da escala)
 ```
 
 Um chamado pode receber várias solicitações ao longo do tempo. Se o ID já existe, o formulário oferece "Adicionar solicitação" em vez de criar outro chamado.
@@ -39,7 +39,7 @@ Um chamado pode receber várias solicitações ao longo do tempo. Se o ID já ex
 | Motivo `OUTROS` exige observação | `CHECK` no item |
 | Linha sem matrícula só entra como `NÃO REALIZADO` / `SEM_MATRICULA` | `CHECK` no item |
 | Turno que termina no dia seguinte exige virada de dia confirmada | `CHECK (hora_fim >= hora_ini OR vira_dia)` |
-| Mesma pessoa no mesmo dia, uma vez por solicitação | índice único parcial `(solicitacao_id, matricula, data_ajuste)` |
+| A mesma linha (matrícula, data, horário e atividade) não entra duas vezes na solicitação | índice único `item_sem_repeticao` |
 | Item só muda enquanto a solicitação está aberta | gatilho `item_estado`, que trava a solicitação e incrementa a versão |
 | Conclusão com contagem desatualizada é recusada | `concluir_solicitacao(id, versao)` compara a versão exibida na tela |
 | Toda alteração de status, motivo ou observação fica registrada | gatilho `item_auditoria` (quem, quando, antes, depois) |
@@ -76,27 +76,55 @@ Um TKT cujas solicitações foram todas apagadas pode voltar como chamado novo, 
 
 ## Planilha aceita
 
-Primeira aba visível do arquivo `.xlsx`.
+O sistema lê a primeira aba visível do `.xlsx` e identifica o layout pelo cabeçalho. As colunas são localizadas pelo nome, em qualquer ordem. Acentos, maiúsculas, espaços e pontuação no cabeçalho são ignorados (`QUAL ATIVIDADE A SER LANÇADA :` é aceito). Linhas que só têm formatação são ignoradas.
+
+### Layout de chamado (principal): uma linha por ajuste
+
+O cabeçalho pode estar em qualquer uma das 15 primeiras linhas, abaixo de linhas de título.
+
+| Coluna | Obrigatória | Conteúdo | Vai para |
+|---|---|---|---|
+| `MATRÍCULA` | sim (valor pode faltar, ver avisos) | somente números | `item.matricula` |
+| `CÉLULA` | não | célula operacional / equipe (ex.: `Amil/TC`) | `item.celula` |
+| `DATA INICIO ATIVIDADE` | sim | data do Excel, serial, `dd/mm/aaaa` ou `aaaa-mm-dd` | `item.data_ajuste` |
+| `HORA INICIO ATIVIDADE` | sim | hora do Excel, fração do dia, `06:00`, `6:00`, `06h00`, `06:00:00` | `item.hora_ini` |
+| `HORA FIM ATIVIDADE` | sim | mesmos formatos da hora de início | `item.hora_fim` |
+| `QUAL ATIVIDADE A SER LANÇADA :` | sim | texto livre, casado com o catálogo pelo nome normalizado | `item.atividade_id` + `item.atividade_original` |
+| `MOTIVO DO AJUSTE` | não | por que o ajuste foi pedido | `item.motivo_ajuste` |
+| `NOME` ou `COLABORADOR` | não | nome do colaborador | `item.colaborador` |
+
+`MOTIVO DO AJUSTE` descreve o pedido. O motivo de recusa (`NÃO REALIZADO`) é outra coisa: é a decisão do analista e fica em `item.motivo_codigo`.
+
+A mesma matrícula pode ter várias atividades no mesmo dia. Uma atividade que ainda não existe no catálogo é cadastrada na confirmação da importação.
+
+**Erros (bloqueiam a confirmação):** coluna obrigatória ausente, matrícula com caractere que não seja número, data vazia ou inexistente (ex.: `31/02/2026`), hora vazia ou fora de 00:00 a 23:59, início igual ao fim, atividade vazia, linha repetida (mesma matrícula, data, horário e atividade).
+
+**Avisos (exigem conferência):** linha sem matrícula, atividade que termina no dia seguinte, duração menor que 5 minutos, horários da mesma matrícula que se sobrepõem, motivo do ajuste vazio, coluna fora do modelo (ignorada).
+
+### Layout de escala: matriz colaborador × data
+
+Mantido para as planilhas de escala mensal (`Escala_Nova.xlsx`).
 
 | Coluna | Obrigatória | Conteúdo |
 |---|---|---|
-| `Operação` | não | operação ou cliente (ex.: `Amil/TC`) |
+| `Operação` ou `Célula` | não | célula operacional, gravada em `item.celula` |
 | `Matrícula` | sim | somente números |
 | `Nome` | sim | nome do colaborador |
 | uma coluna por data | ao menos uma | data do Excel, serial numérico ou texto `dd/mm/aaaa` |
 
-As colunas são localizadas pelo nome do cabeçalho, em qualquer ordem. Linhas que só têm formatação são ignoradas.
-
-**Valores aceitos nas células de data:**
+Cada célula de data preenchida vira um item. Valores aceitos:
 
 - **Turno:** `06:00 AS 14:20`, `09:00 ás 17:20`, `09:00 - 17:20`, `13:40 as 22:00`. Aceita `às`, `as`, `a`, `até`, hífen e meia-risca como separador.
 - **Rótulos:** `DSR`, `Férias`, `Quebra de escala`. A grafia `Quegra de escala`, presente nas planilhas atuais, é reconhecida e preservada como valor original.
 
-**Erros (bloqueiam a confirmação):** planilha vazia, cabeçalho ausente ou desconhecido, data repetida, nenhuma coluna de data, nome vazio, matrícula inválida ou repetida, valor não reconhecido, horário impossível.
+**Erros:** cabeçalho ausente ou desconhecido, data repetida, nenhuma coluna de data, nome vazio, matrícula inválida ou repetida, valor não reconhecido, horário impossível.
 
-**Avisos (exigem conferência):** linha sem matrícula, turno que vira o dia, descanso menor que 11 horas entre dois dias seguidos, turno com duração diferente do padrão da planilha, célula vazia.
+**Avisos:** linha sem matrícula, turno que vira o dia, descanso menor que 11 horas entre dois dias seguidos, turno com duração diferente do padrão da planilha, célula vazia.
 
-> **Matrícula com zero à esquerda:** se a coluna estiver formatada como número, o Excel apaga o zero antes de o sistema receber o arquivo. Formate a coluna como texto na planilha modelo.
+### Nos dois layouts
+
+- Cada problema é mostrado com a célula exata do Excel (`D4`, `F6`). Essa posição fica gravada em `item.ref_origem`.
+- **Matrícula com zero à esquerda:** se a coluna estiver formatada como número, o Excel apaga o zero antes de o sistema receber o arquivo. Formate a coluna como texto na planilha modelo.
 
 ---
 
@@ -106,8 +134,9 @@ As colunas são localizadas pelo nome do cabeçalho, em qualquer ordem. Linhas q
 |---|---|---|
 | Pedidos por dia | solicitações e IDs distintos por `data_solicitacao`, com dia da semana | `v_pedidos_por_dia` |
 | Dias de ponto mais solicitados | itens por `data_ajuste`, todos os status | `v_ajustes_por_data_ponto` |
-| Ajuste mais pedido | itens por tipo (Turno, DSR, Férias, Quebra de escala), todos os status | `v_ranking_atividades` |
-| Turnos mais pedidos | itens por horário de início e fim | `v_ranking_turnos` |
+| Ajuste mais pedido | itens por atividade lançada, todos os status | `v_ranking_atividades` |
+| Itens por célula operacional | itens e IDs por célula, com status | `v_ranking_celulas` |
+| Turnos mais pedidos (escala) | itens por horário de início e fim | `v_ranking_turnos` |
 | Solicitante com mais IDs | chamados distintos, com pedidos e itens em colunas próprias | `v_ranking_solicitantes` |
 | Taxa de realização | realizados ÷ (realizados + não realizados); pendentes exibidos ao lado | `v_ranking_solicitantes` |
 
@@ -143,8 +172,11 @@ Os dois gráficos de data indicam qual campo governa o período. Um pedido receb
 ```
 app/                          páginas e rotas do Next.js (modelo inicial)
 lib/importacao/
-  escala.ts                   leitor da planilha de escala
-  escala.test.ts              testes do leitor com planilhas fictícias
+  index.ts                    lerPlanilha(): identifica o layout e devolve itens e problemas
+  chamado.ts                  leitor do layout de chamado (uma linha por ajuste)
+  escala.ts                   leitor do layout de escala (matriz colaborador × data)
+  comum.ts                    tipos, normalização, leitura de data e hora do Excel
+  *.test.ts                   testes com planilhas fictícias geradas em memória
 db/
   migrations/
     001_schema.sql            tabelas, regras, auditoria, lote de importação, conclusão
@@ -205,7 +237,7 @@ A aplicação deve executar `SET LOCAL app.usuario_id = '<id do analista>'` no i
 | Esquema do banco, regras e auditoria | pronto, testado |
 | Expurgo de 90 dias | função pronta e testada; agendamento pendente |
 | Visões do painel | prontas |
-| Leitor da planilha | pronto, testado com planilha fictícia e validado com uma planilha real (76 células, 0 erros) |
+| Leitor da planilha | pronto para os dois layouts; 23 testes com planilhas fictícias; escala validada com arquivo real (76 itens, 0 erros); layout de chamado ainda sem arquivo real |
 | Autenticação de analistas | pendente |
 | Formulário, upload e prévia | pendente |
 | Tela de conferência e conclusão | pendente |
@@ -214,6 +246,7 @@ A aplicação deve executar `SET LOCAL app.usuario_id = '<id do analista>'` no i
 
 ### Decisões em aberto
 
-1. **O que conta como ajuste pedido:** toda célula da escala ou só as que mudaram. Com toda célula, o ranking de ajustes descreve a escala, e não a demanda. O sistema guarda todas as células, o que mantém as duas opções abertas.
-2. **Outros rótulos possíveis** além de DSR, Férias e Quebra de escala (ex.: Folga, Atestado). Hoje, um rótulo desconhecido bloqueia a importação de propósito.
-3. **Operação como filtro do painel.** O campo já é gravado em cada item.
+1. **A escala continua chegando nos chamados?** Se todo chamado vier no layout de linha por ajuste, o leitor de escala pode ser removido.
+2. **Horas obrigatórias.** Hoje toda linha de chamado exige início e fim. Se existir atividade de dia inteiro (ex.: abono), a regra precisa de exceção.
+3. **Catálogo de atividades.** Texto livre gera variações ("Treinamento", "Treinamento EAD"). Definir se a lista é fechada ou se o analista aprova atividades novas.
+4. **Célula como filtro do painel.** O campo já é gravado em cada item, e a visão `v_ranking_celulas` existe.

@@ -57,10 +57,12 @@ CREATE TABLE solicitante_alias (
 CREATE INDEX solicitante_alias_norm ON solicitante_alias (alias_norm);
 CREATE INDEX solicitante_alias_trgm ON solicitante_alias USING gin (alias_norm gin_trgm_ops);
 
--- Catálogo de tipos de célula da escala. codigo = Tipo em lib/importacao/escala.ts.
+-- Catálogo de atividades ("QUAL ATIVIDADE A SER LANÇADA").
+-- codigo só existe nos tipos fixos da escala (= Tipo em lib/importacao/escala.ts);
+-- atividades novas vindas dos chamados entram com codigo NULL, casadas por nome_norm.
 CREATE TABLE atividade (
   id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  codigo     text NOT NULL UNIQUE CHECK (codigo ~ '^[A-Z_]+$'),
+  codigo     text UNIQUE CHECK (codigo ~ '^[A-Z_]+$'),
   nome       text NOT NULL,
   nome_norm  text GENERATED ALWAYS AS (f_norm(nome)) STORED UNIQUE,
   ativo      boolean NOT NULL DEFAULT true
@@ -127,18 +129,19 @@ CREATE TRIGGER solicitacao_data BEFORE INSERT OR UPDATE OF data_solicitacao ON s
 CREATE TABLE item (
   id                  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   solicitacao_id      bigint NOT NULL REFERENCES solicitacao(id) ON DELETE CASCADE,
-  -- Cada item é uma célula da escala (colaborador × data).
+  -- Um item = uma linha do chamado, ou uma célula da escala (colaborador × data).
   linha_origem        int NOT NULL CHECK (linha_origem > 1),
-  celula              text NOT NULL CHECK (celula ~ '^[A-Z]{1,3}[1-9][0-9]*$'),
-  operacao            text,
+  ref_origem          text NOT NULL CHECK (ref_origem ~ '^[A-Z]{1,3}[1-9][0-9]*$'),  -- posição no Excel: "F5"
+  celula              text,            -- célula operacional / equipe ("Amil/TC")
   matricula           text CHECK (matricula IS NULL OR matricula ~ '^[0-9]+$'),
-  colaborador         text NOT NULL,
-  data_ajuste         date NOT NULL,
+  colaborador         text,            -- nome, quando a planilha traz
+  data_ajuste         date NOT NULL,   -- DATA INICIO ATIVIDADE
   hora_ini            time,
   hora_fim            time,
   vira_dia            boolean NOT NULL DEFAULT false,
   atividade_id        bigint NOT NULL REFERENCES atividade(id),
-  atividade_original  text NOT NULL,   -- valor da célula como veio ("Quegra de escala", "09:00 ás 17:20")
+  atividade_original  text NOT NULL,   -- texto como veio na planilha
+  motivo_ajuste       text,            -- MOTIVO DO AJUSTE: por que foi pedido (a decisão do analista fica em motivo_codigo)
   status              text NOT NULL DEFAULT 'PENDENTE'
                       CHECK (status IN ('PENDENTE', 'REALIZADO', 'NAO_REALIZADO')),
   motivo_codigo       text REFERENCES motivo(codigo),
@@ -146,7 +149,7 @@ CREATE TABLE item (
   avaliado_em         timestamptz,
   avaliado_por        bigint REFERENCES usuario(id),
   versao              int NOT NULL DEFAULT 1,
-  UNIQUE (solicitacao_id, celula),
+  UNIQUE (solicitacao_id, ref_origem),
   -- motivo existe se, e somente se, NÃO REALIZADO
   CHECK ((status = 'NAO_REALIZADO') = (motivo_codigo IS NOT NULL)),
   -- OUTROS exige observação
@@ -159,8 +162,12 @@ CREATE TABLE item (
   CHECK ((status = 'PENDENTE') = (avaliado_em IS NULL))
 );
 CREATE INDEX item_solicitacao ON item (solicitacao_id);
--- mesma pessoa no mesmo dia só uma vez por solicitação
-CREATE UNIQUE INDEX item_pessoa_dia ON item (solicitacao_id, matricula, data_ajuste) WHERE matricula IS NOT NULL;
+CREATE INDEX item_celula      ON item (celula);
+-- Linha repetida (mesma pessoa, dia, horário e atividade) não entra duas vezes na solicitação.
+-- A mesma pessoa pode ter várias atividades no mesmo dia.
+CREATE UNIQUE INDEX item_sem_repeticao ON item
+  (solicitacao_id, matricula, data_ajuste, hora_ini, hora_fim, atividade_id) NULLS NOT DISTINCT
+  WHERE matricula IS NOT NULL;
 CREATE INDEX item_atividade   ON item (atividade_id);
 CREATE INDEX item_data_ajuste ON item (data_ajuste);
 

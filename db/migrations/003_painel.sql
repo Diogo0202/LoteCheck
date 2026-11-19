@@ -39,6 +39,17 @@ SELECT i.hora_ini, i.hora_fim, i.vira_dia, count(*) AS itens
  WHERE a.codigo = 'TURNO'
  GROUP BY i.hora_ini, i.hora_fim, i.vira_dia;
 
+-- Itens por célula operacional.
+CREATE VIEW v_ranking_celulas AS
+SELECT coalesce(celula, '(sem célula)') AS celula,
+       count(*)                                         AS itens,
+       count(DISTINCT s.chamado_id)                     AS ids,
+       count(*) FILTER (WHERE i.status = 'REALIZADO')     AS realizados,
+       count(*) FILTER (WHERE i.status = 'NAO_REALIZADO') AS nao_realizados,
+       count(*) FILTER (WHERE i.status = 'PENDENTE')      AS pendentes
+  FROM item i JOIN solicitacao s ON s.id = i.solicitacao_id
+ GROUP BY 1;
+
 -- Solicitante com mais IDs.
 CREATE VIEW v_ranking_solicitantes AS
 SELECT so.id, so.nome_exibicao,

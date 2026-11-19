@@ -1,6 +1,7 @@
 import ExcelJS from "exceljs";
 import { describe, expect, it } from "vitest";
-import { colunaLetra, lerEscala, normalizar } from "./escala";
+import { colunaLetra, normalizar } from "./comum";
+import { lerPlanilha as lerEscala } from "./index";
 
 /** Monta uma planilha no layout real (Operação | Matrícula | Nome | datas...) com dados fictícios. */
 async function planilha(cabecalho: ExcelJS.CellValue[], linhas: ExcelJS.CellValue[][], linhasVaziasFormatadas = 0) {
@@ -46,36 +47,39 @@ describe("lerEscala: formato real", () => {
     );
     const r = await lerEscala(buf);
 
+    expect(r.layout).toBe("ESCALA");
     expect(r.problemas.filter((p) => p.nivel === "erro")).toEqual([]);
     expect(r.resumo).toEqual({
-      colaboradores: 3,
-      datas: 3,
       itens: 9,
-      porTipo: { TURNO: 5, DSR: 1, FERIAS: 2, QUEBRA_ESCALA: 1 },
+      matriculas: 3,
+      erros: 0,
+      avisos: 0, // todos os turnos têm 8h20
+      porAtividade: { Turno: 5, DSR: 1, "Férias": 2, "Quebra de escala": 1 },
       periodo: { inicio: "2026-10-02", fim: "2026-10-04" },
     });
     expect(r.itens[0]).toEqual({
       linha: 2,
-      celula: "D2",
-      operacao: "Op/X",
+      ref: "D2",
+      celula: "Op/X",
       matricula: "100001",
       colaborador: "MARIA TESTE",
       data: "2026-10-02",
-      tipo: "TURNO",
       horaIni: "06:00",
       horaFim: "14:20",
       viraDia: false,
-      valorOriginal: "06:00 AS 14:20",
+      atividade: "Turno",
+      atividadeOriginal: "06:00 AS 14:20",
+      motivoAjuste: null,
     });
-    expect(r.itens.find((i) => i.celula === "D3")).toMatchObject({ tipo: "QUEBRA_ESCALA", valorOriginal: "Quegra de escala" });
-    expect(r.itens.find((i) => i.celula === "F2")).toMatchObject({ horaIni: "09:00", horaFim: "17:20" });
+    expect(r.itens.find((i) => i.ref === "D3")).toMatchObject({ atividade: "Quebra de escala", atividadeOriginal: "Quegra de escala" });
+    expect(r.itens.find((i) => i.ref === "F2")).toMatchObject({ horaIni: "09:00", horaFim: "17:20" });
   });
 
   it("aceita colunas fora de ordem e sem Operação", async () => {
     const buf = await planilha(["Nome", d("2026-10-02"), "Matrícula"], [["ANA TESTE", "DSR", "123"]]);
     const r = await lerEscala(buf);
     expect(r.problemas).toEqual([]);
-    expect(r.itens[0]).toMatchObject({ celula: "B2", matricula: "123", operacao: null, tipo: "DSR" });
+    expect(r.itens[0]).toMatchObject({ ref: "B2", matricula: "123", celula: null, atividade: "DSR" });
   });
 
   it("preserva zeros à esquerda quando a matrícula está como texto", async () => {
