@@ -69,26 +69,50 @@ SELECT pg_temp.deve_falhar($$INSERT INTO item (solicitacao_id, linha_origem, mat
 INSERT INTO item (solicitacao_id, linha_origem, matricula, atividade_id, atividade_original, hora_ini, hora_fim, vira_dia)
 VALUES (4, 2, '1', 1, 'x', '22:00', '02:00', true);
 
--- Ana: 2 não realizados, depois concluir as solicitações -> pendentes viram realizados, exceto 3 deixados pendentes na solicitação 3
+-- Ana: 2 exceções e conclusão. Solicitação 3 fica com 1 realizado e 3 pendentes.
 UPDATE item SET status='NAO_REALIZADO', motivo_codigo='OUTROS', observacao='colaborador desligado', avaliado_em=now(), avaliado_por=1 WHERE id = 1;
 UPDATE item SET status='NAO_REALIZADO', motivo_codigo='SEM_MATRICULA', avaliado_em=now(), avaliado_por=1 WHERE id = 6;
-SELECT pg_temp.igual(concluir_solicitacao(1, 1), 4, 'concluir solicitação 1');
-SELECT pg_temp.igual(concluir_solicitacao(2, 1), 2, 'concluir solicitação 2');
-SELECT pg_temp.deve_falhar($$SELECT concluir_solicitacao(1, 1)$$, 'concluir com versão antiga');
-UPDATE item SET status='REALIZADO', avaliado_em=now(), avaliado_por=1 WHERE id = 9;
+SELECT pg_temp.igual(concluir_solicitacao(1, (SELECT versao FROM solicitacao WHERE id = 1)), 4, 'concluir solicitação 1');
+SELECT pg_temp.igual(concluir_solicitacao(2, (SELECT versao FROM solicitacao WHERE id = 2)), 2, 'concluir solicitação 2');
+SELECT pg_temp.deve_falhar($$SELECT concluir_solicitacao(1, (SELECT versao FROM solicitacao WHERE id = 1))$$, 'concluir duas vezes');
 
--- 5. Painel (exemplo do parecer: 2 IDs, 12 itens, 7 realizados, 2 não realizados, 3 pendentes = 77,8%)
+-- 5. Estado e concorrência
+SELECT pg_temp.deve_falhar($$UPDATE item SET observacao='x' WHERE id = 2$$, 'editar item de solicitação concluída');
+SELECT pg_temp.deve_falhar($$INSERT INTO item (solicitacao_id, linha_origem, matricula, atividade_id, atividade_original) VALUES (1, 99, '1', 1, 'x')$$, 'acrescentar linha em solicitação concluída');
+CREATE TEMP TABLE v AS SELECT versao FROM solicitacao WHERE id = 3;   -- tela mostra "4 pendentes"
+UPDATE item SET status='REALIZADO', avaliado_em=now(), avaliado_por=1 WHERE id = 9;  -- outro analista dá baixa
+SELECT pg_temp.deve_falhar($$SELECT concluir_solicitacao(3, (SELECT versao FROM v))$$, 'concluir com contagem desatualizada');
+
+-- 6. Lote de importação: dono único e consumo único
+INSERT INTO usuario (email, nome, papel) VALUES ('outro@teste', 'Outro', 'ANALISTA');
+INSERT INTO importacao_lote (id, criado_por, chamado_codigo, solicitante_id, data_solicitacao)
+VALUES ('00000000-0000-0000-0000-000000000001', 1, 'TKT-00000009', 1, hoje_sp());
+SET LOCAL app.usuario_id = '2';
+SELECT pg_temp.deve_falhar($$SELECT consumir_lote('00000000-0000-0000-0000-000000000001')$$, 'lote de outro analista');
+SET LOCAL app.usuario_id = '1';
+SELECT pg_temp.igual((consumir_lote('00000000-0000-0000-0000-000000000001')).chamado_codigo, 'TKT-00000009', 'consumir lote');
+SELECT pg_temp.deve_falhar($$SELECT consumir_lote('00000000-0000-0000-0000-000000000001')$$, 'confirmar lote duas vezes');
+
+-- 7. Homônimos: mesmo alias para duas pessoas = ambíguo
+INSERT INTO solicitante (nome_exibicao, email) VALUES ('Ana Souza', 'ana.souza2@empresa');
+INSERT INTO solicitante_alias (solicitante_id, alias, aprovado_por) VALUES (1, 'Ana S.', 1), ((SELECT id FROM solicitante WHERE email = 'ana.souza2@empresa'), 'ana s', 1);
+SELECT pg_temp.igual((SELECT count(DISTINCT solicitante_id) FROM solicitante_alias WHERE alias_norm = f_norm('ANA S.')), 2::bigint, 'alias ambíguo');
+SELECT pg_temp.igual((SELECT count(*) FROM solicitante WHERE nome_norm = f_norm('ana souza')), 2::bigint, 'nome homônimo');
+SELECT pg_temp.deve_falhar($$INSERT INTO solicitante_alias (solicitante_id, alias, aprovado_por) VALUES (1, 'ANA S.', 1)$$, 'alias repetido na mesma pessoa');
+
+-- 8. Painel (exemplo do parecer: 2 IDs, 12 itens, 7 realizados, 2 não realizados, 3 pendentes = 77,8%)
 SELECT pg_temp.igual(
   (SELECT row(ids, pedidos, itens, realizados, nao_realizados, pendentes, taxa_realizacao)::text
      FROM v_ranking_solicitantes WHERE id = 1),
   '(2,3,12,7,2,3,77.8)', 'ranking Ana');
-SELECT pg_temp.igual((SELECT pedidos FROM v_pedidos_por_dia WHERE dia = hoje_sp() - 1), 2::bigint, 'pedidos ontem');
-SELECT pg_temp.igual((SELECT count(*) FROM auditoria WHERE chamado_id = 1), 8::bigint, 'auditoria TKT-01');
+SELECT pg_temp.igual((SELECT row(pedidos, ids)::text FROM v_pedidos_por_dia WHERE dia = hoje_sp() - 1), '(2,2)', 'pedidos ontem');
+-- 2 exceções + 6 conclusões automáticas + 2 registros de CONCLUIR
+SELECT pg_temp.igual((SELECT count(*) FROM auditoria WHERE chamado_id = 1), 10::bigint, 'auditoria TKT-01');
 
--- 6. Expurgo: simular a passagem de 89 dias
+-- 9. Expurgo: simular a passagem do tempo
 SELECT pg_temp.igual((expurgar_dados(hoje_sp() + 88)).solicitacoes, 1, 'expurgo dia +88');  -- sai só a de hoje-2
 SELECT pg_temp.igual((SELECT count(*) FROM chamado), 3::bigint, 'chamados após +88');
-SELECT pg_temp.igual((SELECT count(*) FROM auditoria WHERE chamado_id = 1), 3::bigint, 'auditoria após +88');
+SELECT pg_temp.igual((SELECT count(*) FROM auditoria WHERE chamado_id = 1), 4::bigint, 'auditoria após +88');
 SELECT pg_temp.igual((expurgar_dados(hoje_sp() + 89)).chamados, 2, 'expurgo dia +89');      -- TKT-01 e TKT-02 somem
 SELECT pg_temp.igual((SELECT codigo FROM chamado), 'TKT-00000003', 'sobra TKT-03');
 

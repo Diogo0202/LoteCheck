@@ -10,7 +10,10 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- unaccent() não é IMMUTABLE; o wrapper com dicionário explícito permite uso em colunas geradas e índices.
 CREATE OR REPLACE FUNCTION f_norm(t text) RETURNS text
 LANGUAGE sql IMMUTABLE PARALLEL SAFE STRICT AS $$
-  SELECT lower(regexp_replace(btrim(public.unaccent('public.unaccent'::regdictionary, t)), '\s+', ' ', 'g'))
+  -- sem acento, minúsculas, pontuação vira espaço, espaços colapsados: " D'Ávila  S. " -> "d avila s"
+  SELECT btrim(regexp_replace(
+           regexp_replace(lower(public.unaccent('public.unaccent'::regdictionary, t)), '[^a-z0-9]+', ' ', 'g'),
+           '\s+', ' ', 'g'))
 $$;
 
 CREATE OR REPLACE FUNCTION hoje_sp() RETURNS date
@@ -44,10 +47,14 @@ CREATE TABLE solicitante_alias (
   id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   solicitante_id  bigint NOT NULL REFERENCES solicitante(id) ON DELETE CASCADE,
   alias           text NOT NULL,
-  alias_norm      text GENERATED ALWAYS AS (f_norm(alias)) STORED UNIQUE,
+  alias_norm      text GENERATED ALWAYS AS (f_norm(alias)) STORED,
   aprovado_por    bigint NOT NULL REFERENCES usuario(id),
-  aprovado_em     timestamptz NOT NULL DEFAULT now()
+  aprovado_em     timestamptz NOT NULL DEFAULT now(),
+  -- Sem UNIQUE global: homônimos legítimos podem compartilhar o mesmo alias.
+  -- Mais de um resultado na busca = correspondência ambígua, o analista escolhe.
+  UNIQUE (solicitante_id, alias_norm)
 );
+CREATE INDEX solicitante_alias_norm ON solicitante_alias (alias_norm);
 CREATE INDEX solicitante_alias_trgm ON solicitante_alias USING gin (alias_norm gin_trgm_ops);
 
 -- Catálogo de tipos de ajuste.
@@ -123,6 +130,7 @@ CREATE TABLE item (
   vira_dia            boolean NOT NULL DEFAULT false,
   atividade_id        bigint NOT NULL REFERENCES atividade(id),
   atividade_original  text NOT NULL,
+  motivo_ajuste_original text,          -- motivo escrito na planilha (descreve o pedido, não a decisão)
   status              text NOT NULL DEFAULT 'PENDENTE'
                       CHECK (status IN ('PENDENTE', 'REALIZADO', 'NAO_REALIZADO')),
   motivo_codigo       text REFERENCES motivo(codigo),
@@ -181,16 +189,63 @@ CREATE TRIGGER item_auditoria BEFORE UPDATE OF status, motivo_codigo, observacao
               IS DISTINCT FROM ROW(NEW.status, NEW.motivo_codigo, NEW.observacao))
   EXECUTE FUNCTION trg_item_auditoria();
 
--- Prévia da importação; expira em 24 h.
+-- Item só muda enquanto a solicitação está ABERTA. O UPDATE abaixo trava a linha da
+-- solicitação e incrementa sua versão: uma baixa concorrente com "Concluir" espera o
+-- lock e falha ao ver CONCLUIDA; uma conclusão com contagem desatualizada falha na versão.
+-- DELETE fica de fora para não bloquear o expurgo em cascata.
+CREATE OR REPLACE FUNCTION trg_item_estado() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  UPDATE solicitacao SET versao = versao + 1
+   WHERE id = NEW.solicitacao_id AND status = 'ABERTA';
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'solicitação % não está aberta', NEW.solicitacao_id USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER item_estado BEFORE INSERT OR UPDATE ON item
+  FOR EACH ROW EXECUTE FUNCTION trg_item_estado();
+
+-- Prévia da importação. O lote pertence ao analista que enviou o arquivo,
+-- expira em 24 h e só pode ser consumido uma vez.
+CREATE TABLE importacao_lote (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  criado_por        bigint NOT NULL REFERENCES usuario(id),
+  chamado_codigo    text NOT NULL CHECK (chamado_codigo ~ '^TKT-[0-9]{8}$'),
+  solicitante_id    bigint NOT NULL REFERENCES solicitante(id),
+  data_solicitacao  date NOT NULL,
+  arquivo_nome      text,
+  criado_em         timestamptz NOT NULL DEFAULT now(),
+  expira_em         timestamptz NOT NULL DEFAULT now() + interval '24 hours',
+  consumido_em      timestamptz,
+  solicitacao_id    bigint UNIQUE REFERENCES solicitacao(id) ON DELETE SET NULL
+);
+
 CREATE TABLE importacao_staging (
-  lote_id     uuid NOT NULL,
-  linha       int NOT NULL,
-  dados       jsonb NOT NULL,
-  erros       jsonb NOT NULL DEFAULT '[]',
-  criado_por  bigint NOT NULL REFERENCES usuario(id),
-  expira_em   timestamptz NOT NULL DEFAULT now() + interval '24 hours',
+  lote_id  uuid NOT NULL REFERENCES importacao_lote(id) ON DELETE CASCADE,
+  linha    int NOT NULL,
+  dados    jsonb NOT NULL,
+  erros    jsonb NOT NULL DEFAULT '[]',
+  avisos   jsonb NOT NULL DEFAULT '[]',
   PRIMARY KEY (lote_id, linha)
 );
+
+-- Marca o lote como consumido. Chamar no início da transação que grava
+-- chamado/solicitação/itens; uma segunda confirmação espera o lock e falha.
+CREATE OR REPLACE FUNCTION consumir_lote(p_lote uuid) RETURNS importacao_lote
+LANGUAGE plpgsql AS $$
+DECLARE v importacao_lote;
+BEGIN
+  UPDATE importacao_lote SET consumido_em = now()
+   WHERE id = p_lote AND criado_por = usuario_atual()
+     AND consumido_em IS NULL AND expira_em > now()
+  RETURNING * INTO v;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'lote % inexistente, de outro analista, expirado ou já confirmado', p_lote
+      USING ERRCODE = 'serialization_failure';
+  END IF;
+  RETURN v;
+END $$;
 
 -- "Concluir solicitação": pendentes restantes viram REALIZADO numa transação.
 CREATE OR REPLACE FUNCTION concluir_solicitacao(p_solicitacao bigint, p_versao int)
@@ -198,15 +253,22 @@ RETURNS int LANGUAGE plpgsql AS $$
 DECLARE v_usuario bigint := usuario_atual(); v_qtd int;
 BEGIN
   IF v_usuario IS NULL THEN RAISE EXCEPTION 'app.usuario_id não definido'; END IF;
-  UPDATE solicitacao
-     SET status = 'CONCLUIDA', concluida_em = now(), concluida_por = v_usuario, versao = versao + 1
-   WHERE id = p_solicitacao AND versao = p_versao AND status = 'ABERTA';
+  -- p_versao é a versão lida quando a tela mostrou "N pendentes serão marcados".
+  PERFORM 1 FROM solicitacao
+   WHERE id = p_solicitacao AND versao = p_versao AND status = 'ABERTA'
+     FOR UPDATE;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'conflito: solicitação % alterada ou já concluída', p_solicitacao USING ERRCODE = 'serialization_failure';
   END IF;
   UPDATE item SET status = 'REALIZADO', avaliado_em = now(), avaliado_por = v_usuario
    WHERE solicitacao_id = p_solicitacao AND status = 'PENDENTE';
   GET DIAGNOSTICS v_qtd = ROW_COUNT;
+  UPDATE solicitacao
+     SET status = 'CONCLUIDA', concluida_em = now(), concluida_por = v_usuario, versao = versao + 1
+   WHERE id = p_solicitacao;
+  INSERT INTO auditoria (chamado_id, entidade, entidade_id, acao, usuario_id, depois)
+  SELECT chamado_id, 'solicitacao', id, 'CONCLUIR', v_usuario, jsonb_build_object('pendentes_realizados', v_qtd)
+    FROM solicitacao WHERE id = p_solicitacao;
   RETURN v_qtd;
 END $$;
 

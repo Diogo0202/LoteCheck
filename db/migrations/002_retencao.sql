@@ -32,9 +32,11 @@ BEGIN
 
   -- Auditoria de solicitações removidas de chamados que continuam ativos.
   DELETE FROM auditoria a
-   WHERE a.entidade = 'item' AND NOT EXISTS (SELECT 1 FROM item i WHERE i.id = a.entidade_id);
+   WHERE (a.entidade = 'item'        AND NOT EXISTS (SELECT 1 FROM item i        WHERE i.id = a.entidade_id))
+      OR (a.entidade = 'solicitacao' AND NOT EXISTS (SELECT 1 FROM solicitacao s WHERE s.id = a.entidade_id));
 
-  DELETE FROM importacao_staging WHERE expira_em < now();
+  -- Prévias (contêm dados pessoais) saem 24 h após o envio; staging em cascata.
+  DELETE FROM importacao_lote WHERE expira_em < now();
 
   INSERT INTO expurgo_log (corte, solicitacoes, itens, chamados)
   VALUES (v_corte, v_solic, v_itens, v_cham) RETURNING * INTO v_log;
